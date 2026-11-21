@@ -25,8 +25,11 @@ def save_hive(db,body,user,key=None):
     db.add(hive);audit(db,user,f'维护蜂箱 {body.code}');db.commit();return hive
 
 def record_visit(db,body,user):
+    from .batch_models import InspectionBatchHive
     hive=require(db,Hive,body.hive_id,True)
     if hive.care_state in ['caring','needs_requeen']:raise HTTPException(409,'该箱处置未结束，请在处置簿登记复查，不能覆盖原巡检')
+    locked=db.scalar(select(InspectionBatchHive.id).where(InspectionBatchHive.hive_id==hive.id,InspectionBatchHive.active_key.is_not(None)))
+    if locked:raise HTTPException(409,'该箱已锁定在在途巡检批次，请在“巡检批次交接”逐箱补录')
     if db.scalar(select(Visit).where(Visit.code==body.code)):raise HTTPException(409,'巡检编号已存在')
     visit=Visit(**body.model_dump());hive.queen_present=body.queen_seen;hive.colony_frames=body.colony_frames;hive.care_state='observe' if body.queen_seen else 'needs_care'
     db.add(visit);audit(db,user,f'巡箱 {hive.code} / {body.code} {body.weight_kg}kg');db.commit();return visit

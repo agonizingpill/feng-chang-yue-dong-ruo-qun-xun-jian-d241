@@ -100,3 +100,21 @@ Seed增加FD-202611-A可用30kg、FD-HOLD隔离8kg、FD-EXPIRED已过期5kg，�
 GET /moves /insulation-lots /insulation-installs /spring-reviews供三角色；POST /moves、complete/cancel、POST /insulation-lots、POST /insulation-installs、PUT ventilation、POST remove及POST /spring-reviews允许蜂师/主管；move approve、insulation accept、spring pass及物料隔离仅主管，viewer全部只读。各新增模型均有外键；物料数量与春检值域由数据库和Pydantic校验。
 
 Seed只在缺失时增加IN-2026-WINTER 120件，不改人工库存/安装/春检；历史winter_ready无需补装以维持历史状态，新的春检动作才要求保温。真实证据在test-artifacts/gb-1027/v3/。本地检疫留痕不替代行政检疫证；每箱每季一条春检，本演示固定2026越冬季，无跨季归档。
+
+
+## V4 巡检批次交接
+
+原九页完整保留，新增“巡检批次交接”，共十业务页；批次把“分组领箱—逐箱补录—交接接收—主管封存—筛选用封存读数”串成一条可恢复的交接链。
+
+1. **领批锁定清单**：`InspectionBatch`记录编号、状态（claimed/received/sealed/cancelled）、分工说明、领批人与时间；`InspectionBatchHive`在领批时逐箱落快照（箱号、场址、顺序），此后编辑蜂箱档案不改本批范围。任一箱重复、已在其他在途批次、存在planned/executed/rechecked处置、箱况caring/needs_requeen、或在途转场，整批404/409退回，`detail.issues`逐箱给出原因，不会部分领用。`active_key`唯一约束保证同一箱同时仅被一个未封存批次占用。重试同一领批（幂等键或同批号同清单）返回原批次，不重复锁定。
+2. **逐箱补录**：`InspectionReading`每箱一条完整读数（体重、箱温、活动、余饲、见王、框数）。任一项缺失即`incomplete`，缺项清单留档；已有完整读数后再次提交不同值即`conflict`，原完整读数不覆盖；完全相同按重复提交忽略。接收前可用`correct_reading_id`更正本箱完整读数，旧值转`superseded`。所有读数带`recorded_by/recorded_at`，客户端重试键`client_reading_id`去重。锁定中的蜂箱不能在“巡箱手记”另建Visit，避免两套入口打架。
+3. **交接接收**：主管调用receive；每箱必须恰好一条完整读数，否则整批409并返回缺检箱、缺项与冲突，仍在原批继续补录。成功后state=received、记录接收人/时间；同一接收重试幂等，不同请求拒绝。
+4. **主管封存**：仅received批次可封存，封存依据至少5字。封存时把每箱读数、补录人、接收人与时间写入`seal_snapshot`并计算SHA-256指纹`seal_fingerprint`；同时为每箱生成/复用`V-B{批次}-{箱号}`巡检并同步蜂箱王况与框数。封存后快照不可变，重复封存（同幂等键或同人同依据）返回原封存，不产生第二份。
+5. **筛选用封存读数**：`POST /inspection-batches/{id}/screen`把`seal_snapshot`里的reading_id送入IsolationForest，结果写回读数与封存生成的Visit；只有该箱最新封存批次才更新箱况，旧批次迟到的筛查任务只标记`current=false`并把对应旧Visit置stale，绝不用旧读数覆盖新批分值。并发筛查复用同一job_id（排队5分钟内）；done后不重复覆盖。
+6. **迟到补录进下一批**：对已封存批次补录同箱读数时，若该箱有claimed的下一批则并入，否则自动新建`{原批号}-L{n}`并锁定该箱，返回`redirected`与新批次；原封存快照、指纹和分值不变。若下一批已received，则拒绝插入，需等封存/取消后再补。取消未封存批释放箱清单占用，可重新领批。
+
+接口：`GET /inspection-batches`（摘要）、`GET /inspection-batches/{id}`（含逐箱读数、进度、缺检、冲突、快照）、`POST /inspection-batches`（蜂师/主管领批）、`POST /inspection-batches/{id}/readings`（蜂师/主管补录）、`POST /inspection-batches/{id}/receive`（主管）、`POST /inspection-batches/{id}/seal`（主管）、`POST /inspection-batches/{id}/cancel`、`POST /inspection-batches/{id}/screen`、`GET /inspection-batches/{id}/screen/{jobid}`；viewer全部只读。后端新增`batch_models.py/batch_schemas.py/batch_routes.py/batch_service.py`，`worker.py`新增`apiary:batch-screen`队列并行消费原`apiary:screening`。
+
+前端`pages/batches.js`显示批次进度条、缺检箱清单、缺项与冲突证据、责任人（领批/接收/封存人及时间）、封存依据与快照表；封存后仍可提交迟到补录，页面明确提示进入下一批。Seed只在缺失时补建`BAT-1117-DEMO`（H-005/H-006完整、H-007缺活动与余饲），用于演示缺项留在原批；不改人工批次。三张新表由metadata补建，无旧表列变更。
+
+范围：批次为一次分组巡箱的交接凭证，不做多级审批、跨场调拨或按日期自动切批；封存读取当前最新完整读数并在接收时已校验唯一，不提供封存后回滚（仅可另开下一批更正）；迟到补录不会追溯修改历史封存快照。
